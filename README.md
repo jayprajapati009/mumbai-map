@@ -3,7 +3,10 @@
 A real-time, browser-based 3D view of South Mumbai (Fort–Marine
 Lines–Dadar) — buildings extruded from their real footprints, roads,
 creeks, and parks — rendered with [Three.js](https://threejs.org/), with a
-day/night toggle and glowing window lights at night.
+day/night toggle, glowing window lights at night, and simulated traffic
+flowing along the real road network. Covers South Mumbai up through Worli,
+Lower Parel and Bandra-Kurla Complex — the modern high-rise skyline and the
+Coastal Road, not just the old colonial-era core.
 
 **Live demo: https://jayprajapati009.github.io/mumbai-map/**
 
@@ -58,7 +61,10 @@ UI (ODbL requires it) and keep crediting jeantimex/tokyo as the inspiration.
 4. **`src/main.js`** — fetches `city-data.json`, extrudes every building
    footprint into a single merged `BufferGeometry`, builds flat meshes for
    roads/water/parks, scatters instanced "window light" quads on tall
-   buildings for the night view, and renders it all with Three.js +
+   buildings for the night view, spawns instanced vehicles that travel along
+   the real road polylines each frame (a simulation layered on top of the
+   static geometry — there's no public live-traffic data source, the same
+   approach jeantimex/tokyo uses), and renders it all with Three.js +
    `OrbitControls` + `UnrealBloomPass`.
 
 ## Running locally

@@ -21,9 +21,11 @@ for (const el of raw.elements) {
   else if (el.type === 'way') ways.push(el);
 }
 
-// Center on South Mumbai (Fort / Marine Lines / Dadar area)
-const LAT0 = 18.960;
-const LON0 = 72.830;
+// Center on Mumbai, spanning South Mumbai (Fort/Colaba/Marine Lines) north
+// through Worli, Lower Parel, Bandra and BKC — covers the modern high-rise
+// skyline and the Coastal Road, not just the old colonial-era core.
+const LAT0 = 18.985;
+const LON0 = 72.835;
 const R = 6378137;
 const DEG = Math.PI / 180;
 const cosLat0 = Math.cos(LAT0 * DEG);
@@ -103,7 +105,10 @@ for (const w of ways) {
       const a = area(pts);
       height = 7 + Math.min(18, Math.sqrt(a) * 0.9);
     }
-    height = Math.min(height, 120);
+    // 120m suited Ahmedabad/Vadodara's mid-rise skyline but flattens Mumbai's
+    // actual supertalls (Palais Royale ~320m, World One ~280m+); cap high
+    // enough to preserve that variation without trusting a wildly bad tag.
+    height = Math.min(height, 420);
     trackBounds(pts);
     buildings.push({ h: Math.round(height * 10) / 10, pts: pts.map(p => [Math.round(p[0] * 10) / 10, Math.round(p[1] * 10) / 10]) });
   } else if (tags.highway) {

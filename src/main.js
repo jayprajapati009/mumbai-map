@@ -7,9 +7,10 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
 // -----------------------------------------------------------------------
-// Procedural Vadodara — a real-time 3D city view built from OpenStreetMap
-// building footprints, roads, water and parks. Inspired by jeantimex/tokyo
-// (https://github.com/jeantimex/tokyo); no code from that project is reused.
+// Procedural Mumbai — a real-time 3D city view built from OpenStreetMap
+// building footprints, roads, water and parks, plus simulated traffic.
+// Inspired by jeantimex/tokyo (https://github.com/jeantimex/tokyo); no code
+// from that project is reused.
 // -----------------------------------------------------------------------
 
 const loadingEl = document.getElementById('loading');
@@ -33,14 +34,14 @@ app.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
 
-const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 1, 20000);
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 1, 40000);
 camera.position.set(650, 520, 820);
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.dampingFactor = 0.06;
 controls.minDistance = 40;
-controls.maxDistance = 5000;
+controls.maxDistance = 16000; // far enough to see the whole ~10km mapped area from top-down
 controls.maxPolarAngle = Math.PI * 0.49;
 controls.target.set(0, 20, 0);
 controls.update();
@@ -81,8 +82,8 @@ const PALETTES = {
   night: {
     bg: 0x05070a,
     fog: 0x05070a,
-    fogNear: 2200,
-    fogFar: 8500,
+    fogNear: 5000,
+    fogFar: 19000,
     hemiSky: 0x33475c,
     hemiGround: 0x0a0b0d,
     hemiIntensity: 0.35,
@@ -99,8 +100,8 @@ const PALETTES = {
   day: {
     bg: 0x9fc7e0,
     fog: 0xb9d9ec,
-    fogNear: 2800,
-    fogFar: 11000,
+    fogNear: 6000,
+    fogFar: 23000,
     hemiSky: 0xbfe0f5,
     hemiGround: 0x4a4536,
     hemiIntensity: 0.9,
@@ -256,7 +257,11 @@ function buildBuildings(buildings) {
 function buildWindowLights(positions, normals) {
   const instCount = positions.length / 3;
   if (instCount === 0) return null;
-  const quad = new THREE.PlaneGeometry(1.1, 1.1);
+  // Sized well past a real window (~1.2m) on purpose: at typical camera
+  // distance (500-1500m) a realistic size rasterizes to a sub-pixel speck
+  // that's effectively invisible even with bloom. This is a stylized glow,
+  // not a literal window.
+  const quad = new THREE.PlaneGeometry(2.6, 2.6);
   const mesh = new THREE.InstancedMesh(
     quad,
     new THREE.MeshBasicMaterial({
@@ -265,6 +270,11 @@ function buildWindowLights(positions, normals) {
       opacity: 1,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
+      // dummy.lookAt() below points the quad's local -Z outward, which means
+      // its default front face (+Z normal) ends up facing INTO the building.
+      // Without DoubleSide every window light is back-face-culled and
+      // invisible from any normal exterior viewing angle.
+      side: THREE.DoubleSide,
     }),
     instCount
   );
@@ -285,8 +295,14 @@ function buildWindowLights(positions, normals) {
     colorArray[i * 3 + 1] = c.g * flicker;
     colorArray[i * 3 + 2] = c.b * flicker;
   }
+  // mesh.instanceColor alone makes Three.js apply per-instance color
+  // automatically (it's gated on object.instanceColor existing, independent
+  // of material.vertexColors). Do NOT also set material.vertexColors = true
+  // here: that flag asks the shader for a per-VERTEX `color` attribute on
+  // the geometry, which this plain PlaneGeometry doesn't have — WebGL
+  // defaults a missing attribute to (0,0,0,1), silently multiplying every
+  // instance's color down to black.
   mesh.instanceColor = new THREE.InstancedBufferAttribute(colorArray, 3);
-  mesh.material.vertexColors = true;
   return mesh;
 }
 
@@ -335,6 +351,122 @@ function buildRoads(roads) {
 }
 
 // -----------------------------------------------------------------------
+// Traffic: simple simulated vehicles following the real road network.
+// Not real traffic data (no such public feed exists) — cars are spawned
+// onto road polylines we already have and animated along them each frame,
+// the same way jeantimex/tokyo's traffic is a simulation layer on top of
+// static geometry rather than sourced data.
+// -----------------------------------------------------------------------
+let traffic = null;
+const trafficDummy = new THREE.Object3D();
+const CAR_LENGTH = 4.0, CAR_WIDTH = 1.8, CAR_HEIGHT = 1.5;
+const VEHICLE_CLASSES = new Set([
+  'motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'residential',
+  'unclassified', 'living_street', 'motorway_link', 'trunk_link',
+  'primary_link', 'secondary_link', 'tertiary_link',
+]);
+const CAR_COLORS = [0xd8d8d8, 0xb0b4ba, 0x8a3b3b, 0x2f4a6b, 0x3a3a3a, 0xc9a227, 0x5a6b4a];
+
+function buildTraffic(roads) {
+  const lanes = []; // { pts: [[x,z],...], cum: [0,...], total }
+  for (const r of roads) {
+    if (!VEHICLE_CLASSES.has(r.c)) continue;
+    const pts = r.pts;
+    if (!pts || pts.length < 2) continue;
+    // same north -> -z convention as buildRoads/buildBuildings
+    const worldPts = pts.map(([x, y]) => [x, -y]);
+    const cum = [0];
+    let total = 0;
+    for (let i = 0; i < worldPts.length - 1; i++) {
+      const dx = worldPts[i + 1][0] - worldPts[i][0];
+      const dz = worldPts[i + 1][1] - worldPts[i][1];
+      total += Math.hypot(dx, dz);
+      cum.push(total);
+    }
+    if (total < 20) continue; // skip tiny stub ways
+    lanes.push({ pts: worldPts, cum, total });
+  }
+  if (!lanes.length) return null;
+
+  const totalLength = lanes.reduce((s, l) => s + l.total, 0);
+  const carCount = Math.max(60, Math.min(1400, Math.round(totalLength / 22)));
+
+  // Weighted lane picker so longer roads naturally carry proportionally more cars.
+  const laneCumWeight = [];
+  { let s = 0; for (const l of lanes) { s += l.total; laneCumWeight.push(s); } }
+  function pickLane() {
+    const r = Math.random() * totalLength;
+    let lo = 0, hi = laneCumWeight.length - 1;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (laneCumWeight[mid] < r) lo = mid + 1; else hi = mid; }
+    return lo;
+  }
+
+  const geo = new THREE.BoxGeometry(CAR_WIDTH, CAR_HEIGHT, CAR_LENGTH);
+  geo.translate(0, CAR_HEIGHT / 2, 0); // sit on the ground instead of centered through it
+  // No material.vertexColors here — mesh.instanceColor below applies
+  // per-instance color automatically; vertexColors would instead ask for a
+  // per-vertex geometry `color` attribute this box doesn't have, which
+  // WebGL defaults to black and silences every car's color (see
+  // buildWindowLights for the same gotcha).
+  const mat = new THREE.MeshStandardMaterial({ roughness: 0.6, metalness: 0.2 });
+  const mesh = new THREE.InstancedMesh(geo, mat, carCount);
+  mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+
+  const colorArray = new Float32Array(carCount * 3);
+  const tmpColor = new THREE.Color();
+  const cars = [];
+  for (let i = 0; i < carCount; i++) {
+    cars.push({
+      lane: pickLane(),
+      t: Math.random(),
+      speed: 5 + Math.random() * 6, // m/s (~18-40 km/h): city-street pace
+      dir: Math.random() < 0.5 ? 1 : -1,
+    });
+    tmpColor.setHex(CAR_COLORS[(Math.random() * CAR_COLORS.length) | 0]);
+    colorArray[i * 3] = tmpColor.r; colorArray[i * 3 + 1] = tmpColor.g; colorArray[i * 3 + 2] = tmpColor.b;
+  }
+  mesh.instanceColor = new THREE.InstancedBufferAttribute(colorArray, 3);
+  mesh.frustumCulled = false; // instances are spread across the whole city; a single bounding sphere isn't useful
+
+  return { mesh, lanes, cars };
+}
+
+function sampleLane(lane, distAlong) {
+  const cum = lane.cum;
+  let i = 0;
+  while (i < cum.length - 2 && cum[i + 1] < distAlong) i++;
+  const segLen = cum[i + 1] - cum[i];
+  const localT = segLen > 1e-5 ? (distAlong - cum[i]) / segLen : 0;
+  const a = lane.pts[i], b = lane.pts[i + 1];
+  const x = a[0] + (b[0] - a[0]) * localT;
+  const z = a[1] + (b[1] - a[1]) * localT;
+  let tx = b[0] - a[0], tz = b[1] - a[1];
+  const tl = Math.hypot(tx, tz) || 1;
+  return { x, z, tx: tx / tl, tz: tz / tl };
+}
+
+function updateTraffic(dt) {
+  if (!traffic) return;
+  const { mesh, lanes, cars } = traffic;
+  for (let i = 0; i < cars.length; i++) {
+    const car = cars[i];
+    const lane = lanes[car.lane];
+    car.t += (car.speed * dt) / lane.total;
+    if (car.t > 1) car.t -= 1;
+    const distAlong = (car.dir > 0 ? car.t : 1 - car.t) * lane.total;
+    const { x, z, tx, tz } = sampleLane(lane, distAlong);
+    const hx = tx * car.dir, hz = tz * car.dir; // heading, flipped for the oncoming direction
+    const nx = -hz, nz = hx; // perpendicular, to offset opposing traffic off the centerline
+    const lateral = 1.6 * car.dir;
+    trafficDummy.position.set(x + nx * lateral, 0.15, z + nz * lateral);
+    trafficDummy.rotation.set(0, Math.atan2(hx, hz), 0);
+    trafficDummy.updateMatrix();
+    mesh.setMatrixAt(i, trafficDummy.matrix);
+  }
+  mesh.instanceMatrix.needsUpdate = true;
+}
+
+// -----------------------------------------------------------------------
 // Load data and build the scene
 // -----------------------------------------------------------------------
 async function init() {
@@ -380,6 +512,8 @@ async function init() {
     roadMesh.position.y = 0.08;
     scene.add(roadMesh);
   }
+  traffic = buildTraffic(data.roads);
+  if (traffic) scene.add(traffic.mesh);
   setProgress(0.7, `extruding ${data.buildings.length.toLocaleString()} buildings…`);
   await new Promise(r => setTimeout(r, 0));
 
@@ -430,8 +564,11 @@ window.addEventListener('resize', () => {
   composer.setSize(window.innerWidth, window.innerHeight);
 });
 
+const clock = new THREE.Clock();
 function animate() {
   requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.1); // clamp so a stalled/backgrounded tab doesn't make cars jump
+  updateTraffic(dt);
   controls.update();
   composer.render();
 }

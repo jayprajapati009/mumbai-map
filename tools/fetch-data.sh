@@ -18,7 +18,7 @@ for url in "${MIRRORS[@]}"; do
   if curl -s -X POST \
       -H "User-Agent: vadodara-map-builder/1.0" \
       --data-urlencode "data@query.overpass" \
-      "$url" -o raw-overpass.json --max-time 120 \
+      "$url" -o raw-overpass.json --max-time 170 \
     && [ "$(stat -c%s raw-overpass.json 2>/dev/null || stat -f%z raw-overpass.json)" -gt 1000000 ]; then
     echo "Saved raw-overpass.json ($(du -h raw-overpass.json | cut -f1))"
     exit 0
